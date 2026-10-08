@@ -4,6 +4,10 @@ A visually stunning AI-powered trading workstation that streams live market data
 
 Built entirely by coding agents as a capstone project for an agentic AI coding course.
 
+## Status
+
+Work in progress. The market data component (`backend/app/market/`: GBM simulator, Massive client, price cache, SSE) is complete; see [planning/MARKET_DATA_SUMMARY.md](planning/MARKET_DATA_SUMMARY.md). The API, database, LLM chat, frontend and Docker packaging are still to be built. The full spec is in [planning/PLAN.md](planning/PLAN.md).
+
 ## Features
 
 - **Live price streaming** via SSE with green/red flash animations
@@ -19,11 +23,19 @@ Single Docker container serving everything on port 8000:
 
 - **Frontend**: Next.js (static export) with TypeScript and Tailwind CSS
 - **Backend**: FastAPI (Python/uv) with SSE streaming
-- **Database**: SQLite with lazy initialization
+- **Database**: SQLite, created and seeded at startup
 - **AI**: LiteLLM → OpenRouter (Cerebras inference) with structured outputs
 - **Market data**: Built-in GBM simulator (default) or Massive API (optional)
 
-## Quick Start
+## Quick Start (planned)
+
+Not runnable yet. The Dockerfile, `.env.example` and frontend are still to be added. The market data demo can be run today:
+
+```bash
+cd backend && uv sync && uv run python market_data_demo.py
+```
+
+Target workflow once complete:
 
 ```bash
 # Clone and configure
@@ -41,7 +53,7 @@ docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 
 | Variable | Required | Description |
 |---|---|---|
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key for AI chat |
+| `OPENROUTER_API_KEY` | For chat | OpenRouter API key; without it the app runs but chat returns `chat_unavailable` |
 | `MASSIVE_API_KEY` | No | Massive (Polygon.io) key for real market data; omit to use simulator |
 | `LLM_MOCK` | No | Set `true` for deterministic mock LLM responses (testing) |
 
