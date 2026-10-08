@@ -1,6 +1,6 @@
 # Market Data Backend — Summary
 
-**Status:** Complete, tested, reviewed, all issues resolved.
+**Status:** Complete and tested (196 tests, 99% coverage). Updated to the PLAN.md contract: `baseline_price`, per-ticker ISO SSE events with heartbeat, `validate_ticker`, simulator limited to the known ticker set, Massive field names verified against the installed `massive` package, auth-failure fallback to the simulator.
 
 ## What Was Built
 

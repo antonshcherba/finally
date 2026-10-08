@@ -1,77 +1,72 @@
-"""Tests for PriceUpdate dataclass."""
+"""Tests for PriceUpdate."""
+
+from datetime import datetime
 
 import pytest
 
 from app.market.models import PriceUpdate
 
 
-class TestPriceUpdate:
-    """Unit tests for the PriceUpdate model."""
+def _update(price, previous, baseline=100.0, ts=1_700_000_000.0):
+    return PriceUpdate("AAPL", price, previous, baseline, ts)
 
-    def test_price_update_creation(self):
-        """Test basic PriceUpdate creation."""
-        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
-        assert update.ticker == "AAPL"
-        assert update.price == 190.50
-        assert update.previous_price == 190.00
-        assert update.timestamp == 1234567890.0
 
-    def test_change_calculation(self):
-        """Test price change calculation."""
-        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
-        assert update.change == 0.50
+class TestDirection:
+    def test_up(self):
+        u = _update(101.0, 100.0)
+        assert u.direction == "up" and u.change == 1.0 and u.change_percent == 1.0
 
-    def test_change_negative(self):
-        """Test negative price change."""
-        update = PriceUpdate(ticker="AAPL", price=189.50, previous_price=190.00, timestamp=1234567890.0)
-        assert update.change == -0.50
+    def test_down(self):
+        u = _update(99.0, 100.0)
+        assert u.direction == "down" and u.change == -1.0 and u.change_percent == -1.0
 
-    def test_change_percent_up(self):
-        """Test percentage change calculation (up)."""
-        update = PriceUpdate(ticker="AAPL", price=190.00, previous_price=100.00, timestamp=1234567890.0)
-        assert update.change_percent == 90.0
+    def test_flat(self):
+        u = _update(100.0, 100.0)
+        assert u.direction == "flat" and u.change == 0.0 and u.change_percent == 0.0
 
-    def test_change_percent_down(self):
-        """Test percentage change calculation (down)."""
-        update = PriceUpdate(ticker="AAPL", price=100.00, previous_price=200.00, timestamp=1234567890.0)
-        assert update.change_percent == -50.0
+    def test_zero_previous_price_does_not_divide(self):
+        assert _update(10.0, 0.0).change_percent == 0.0
 
-    def test_change_percent_zero_previous(self):
-        """Test percentage change with zero previous price."""
-        update = PriceUpdate(ticker="AAPL", price=100.00, previous_price=0.00, timestamp=1234567890.0)
-        assert update.change_percent == 0.0
 
-    def test_direction_up(self):
-        """Test direction calculation (up)."""
-        update = PriceUpdate(ticker="AAPL", price=191.00, previous_price=190.00, timestamp=1234567890.0)
-        assert update.direction == "up"
+class TestDailyChange:
+    def test_measured_against_baseline_not_previous(self):
+        u = _update(price=105.0, previous=104.0, baseline=100.0)
+        assert u.daily_change_percent == 5.0
+        assert u.change_percent != u.daily_change_percent
 
-    def test_direction_down(self):
-        """Test direction calculation (down)."""
-        update = PriceUpdate(ticker="AAPL", price=189.00, previous_price=190.00, timestamp=1234567890.0)
-        assert update.direction == "down"
+    def test_negative(self):
+        assert _update(95.0, 95.0, baseline=100.0).daily_change_percent == -5.0
 
-    def test_direction_flat(self):
-        """Test direction calculation (flat)."""
-        update = PriceUpdate(ticker="AAPL", price=190.00, previous_price=190.00, timestamp=1234567890.0)
-        assert update.direction == "flat"
+    def test_zero_baseline(self):
+        assert _update(10.0, 10.0, baseline=0.0).daily_change_percent == 0.0
 
-    def test_to_dict(self):
-        """Test serialization to dictionary."""
-        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
-        result = update.to_dict()
 
-        assert result["ticker"] == "AAPL"
-        assert result["price"] == 190.50
-        assert result["previous_price"] == 190.00
-        assert result["timestamp"] == 1234567890.0
-        assert result["change"] == 0.50
-        assert result["change_percent"] == 0.2632  # (0.50 / 190.00) * 100
-        assert result["direction"] == "up"
+class TestSse:
+    def test_payload_has_exactly_the_plan_keys(self):
+        assert set(_update(101.0, 100.0).to_sse()) == {
+            "ticker",
+            "price",
+            "previous_price",
+            "baseline_price",
+            "timestamp",
+            "direction",
+        }
 
-    def test_immutability(self):
-        """Test that PriceUpdate is immutable."""
-        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
+    def test_values(self):
+        payload = _update(101.0, 100.0, baseline=99.0).to_sse()
+        assert payload["ticker"] == "AAPL"
+        assert payload["price"] == 101.0
+        assert payload["previous_price"] == 100.0
+        assert payload["baseline_price"] == 99.0
+        assert payload["direction"] == "up"
 
-        with pytest.raises(AttributeError):
-            update.price = 200.00  # Should raise error
+    def test_timestamp_is_utc_iso(self):
+        ts = _update(1.0, 1.0, ts=1_700_000_000.0).to_sse()["timestamp"]
+        parsed = datetime.fromisoformat(ts)
+        assert parsed.utcoffset().total_seconds() == 0
+        assert parsed.timestamp() == 1_700_000_000.0
+
+
+def test_immutable():
+    with pytest.raises(AttributeError):
+        _update(1.0, 1.0).price = 2.0  # type: ignore[misc]

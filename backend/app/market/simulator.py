@@ -10,17 +10,18 @@ import random
 import numpy as np
 
 from .cache import PriceCache
+from .errors import InvalidTicker, UnknownTicker
 from .interface import MarketDataSource
 from .seed_prices import (
     CORRELATION_GROUPS,
     CROSS_GROUP_CORR,
-    DEFAULT_PARAMS,
     INTRA_FINANCE_CORR,
     INTRA_TECH_CORR,
     SEED_PRICES,
     TICKER_PARAMS,
     TSLA_CORR,
 )
+from .tickers import normalize_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ class GBMSimulator:
 
     The tiny dt (~8.5e-8 for 500ms ticks over 252 trading days * 6.5h/day)
     produces sub-cent moves per tick that accumulate naturally over time.
+
+    Only tickers in SEED_PRICES are supported; anything else raises UnknownTicker.
     """
 
     # 500ms expressed as a fraction of a trading year
@@ -52,9 +55,13 @@ class GBMSimulator:
         tickers: list[str],
         dt: float = DEFAULT_DT,
         event_probability: float = 0.001,
+        seed: int | None = None,
     ) -> None:
         self._dt = dt
         self._event_prob = event_probability
+        # Private RNGs: reproducible with `seed`, immune to global random state.
+        self._rng = np.random.default_rng(seed)
+        self._py_rng = random.Random(seed)
 
         # Per-ticker state
         self._tickers: list[str] = []
@@ -64,12 +71,21 @@ class GBMSimulator:
         # Cholesky decomposition of the correlation matrix (for correlated moves)
         self._cholesky: np.ndarray | None = None
 
-        # Initialize all starting tickers
         for ticker in tickers:
             self._add_ticker_internal(ticker)
         self._rebuild_cholesky()
 
     # --- Public API ---
+
+    @staticmethod
+    def is_known(ticker: str) -> bool:
+        """True if the simulator has a seed price and parameters for `ticker`."""
+        return ticker.strip().upper() in SEED_PRICES
+
+    @staticmethod
+    def get_baseline(ticker: str) -> float | None:
+        """The ticker's baseline price (its seed price), or None if unknown."""
+        return SEED_PRICES.get(ticker.strip().upper())
 
     def step(self) -> dict[str, float]:
         """Advance all tickers by one time step. Returns {ticker: new_price}.
@@ -80,31 +96,26 @@ class GBMSimulator:
         if n == 0:
             return {}
 
-        # Generate n independent standard normal draws
-        z_independent = np.random.standard_normal(n)
-
-        # Apply Cholesky to get correlated draws
+        z = self._rng.standard_normal(n)
         if self._cholesky is not None:
-            z_correlated = self._cholesky @ z_independent
-        else:
-            z_correlated = z_independent
+            z = self._cholesky @ z
 
+        sqrt_dt = math.sqrt(self._dt)
         result: dict[str, float] = {}
         for i, ticker in enumerate(self._tickers):
             params = self._params[ticker]
             mu = params["mu"]
             sigma = params["sigma"]
 
-            # GBM: S(t+dt) = S(t) * exp((mu - 0.5*sigma^2)*dt + sigma*sqrt(dt)*Z)
             drift = (mu - 0.5 * sigma**2) * self._dt
-            diffusion = sigma * math.sqrt(self._dt) * z_correlated[i]
+            diffusion = sigma * sqrt_dt * z[i]
             self._prices[ticker] *= math.exp(drift + diffusion)
 
             # Random event: ~0.1% chance per tick per ticker
             # With 10 tickers at 2 ticks/sec, expect an event ~every 50 seconds
-            if random.random() < self._event_prob:
-                shock_magnitude = random.uniform(0.02, 0.05)
-                shock_sign = random.choice([-1, 1])
+            if self._py_rng.random() < self._event_prob:
+                shock_magnitude = self._py_rng.uniform(0.02, 0.05)
+                shock_sign = self._py_rng.choice((-1, 1))
                 self._prices[ticker] *= 1 + shock_magnitude * shock_sign
                 logger.debug(
                     "Random event on %s: %.1f%% %s",
@@ -119,6 +130,7 @@ class GBMSimulator:
 
     def add_ticker(self, ticker: str) -> None:
         """Add a ticker to the simulation. Rebuilds the correlation matrix."""
+        ticker = normalize_ticker(ticker)
         if ticker in self._prices:
             return
         self._add_ticker_internal(ticker)
@@ -126,6 +138,7 @@ class GBMSimulator:
 
     def remove_ticker(self, ticker: str) -> None:
         """Remove a ticker from the simulation. Rebuilds the correlation matrix."""
+        ticker = ticker.strip().upper()
         if ticker not in self._prices:
             return
         self._tickers.remove(ticker)
@@ -135,7 +148,8 @@ class GBMSimulator:
 
     def get_price(self, ticker: str) -> float | None:
         """Current price for a ticker, or None if not tracked."""
-        return self._prices.get(ticker)
+        price = self._prices.get(ticker.strip().upper())
+        return None if price is None else round(price, 2)
 
     def get_tickers(self) -> list[str]:
         """Return the list of currently tracked tickers."""
@@ -145,23 +159,25 @@ class GBMSimulator:
 
     def _add_ticker_internal(self, ticker: str) -> None:
         """Add a ticker without rebuilding Cholesky (for batch initialization)."""
+        ticker = normalize_ticker(ticker)
         if ticker in self._prices:
             return
+        if ticker not in SEED_PRICES:
+            raise UnknownTicker(f"Unknown ticker: {ticker}")
         self._tickers.append(ticker)
-        self._prices[ticker] = SEED_PRICES.get(ticker, random.uniform(50.0, 300.0))
-        self._params[ticker] = TICKER_PARAMS.get(ticker, dict(DEFAULT_PARAMS))
+        self._prices[ticker] = SEED_PRICES[ticker]
+        self._params[ticker] = dict(TICKER_PARAMS[ticker])
 
     def _rebuild_cholesky(self) -> None:
         """Rebuild the Cholesky decomposition of the ticker correlation matrix.
 
-        Called whenever tickers are added or removed. O(n^2) but n < 50.
+        Called whenever tickers are added or removed. O(n^3) via numpy, fine for n < 50.
         """
         n = len(self._tickers)
         if n <= 1:
             self._cholesky = None
             return
 
-        # Build the correlation matrix
         corr = np.eye(n)
         for i in range(n):
             for j in range(i + 1, n):
@@ -180,12 +196,11 @@ class GBMSimulator:
           - Same finance sector: 0.5
           - TSLA with anything: 0.3 (it does its own thing)
           - Cross-sector:       0.3
-          - Unknown tickers:    0.3
         """
         tech = CORRELATION_GROUPS["tech"]
         finance = CORRELATION_GROUPS["finance"]
 
-        # TSLA is in tech set but behaves independently
+        # TSLA is in the tech set but behaves independently
         if t1 == "TSLA" or t2 == "TSLA":
             return TSLA_CORR
 
@@ -204,30 +219,32 @@ class SimulatorDataSource(MarketDataSource):
     `update_interval` seconds and writes results to the PriceCache.
     """
 
+    mode = "simulator"
+
     def __init__(
         self,
         price_cache: PriceCache,
         update_interval: float = 0.5,
         event_probability: float = 0.001,
+        seed: int | None = None,
     ) -> None:
         self._cache = price_cache
         self._interval = update_interval
-        self._event_prob = event_probability
-        self._sim: GBMSimulator | None = None
+        self._sim = GBMSimulator([], event_probability=event_probability, seed=seed)
         self._task: asyncio.Task | None = None
 
     async def start(self, tickers: list[str]) -> None:
-        self._sim = GBMSimulator(
-            tickers=tickers,
-            event_probability=self._event_prob,
-        )
-        # Seed the cache with initial prices so SSE has data immediately
+        """Seed the cache for every supported ticker and start the tick loop.
+
+        Tickers outside the supported set are skipped with a warning (e.g. stale DB rows).
+        """
         for ticker in tickers:
-            price = self._sim.get_price(ticker)
-            if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+            try:
+                await self.add_ticker(ticker)
+            except (InvalidTicker, UnknownTicker):
+                logger.warning("Simulator: skipping unsupported ticker %r", ticker)
         self._task = asyncio.create_task(self._run_loop(), name="simulator-loop")
-        logger.info("Simulator started with %d tickers", len(tickers))
+        logger.info("Simulator started with %d tickers", len(self._sim.get_tickers()))
 
     async def stop(self) -> None:
         if self._task and not self._task.done():
@@ -240,31 +257,38 @@ class SimulatorDataSource(MarketDataSource):
         logger.info("Simulator stopped")
 
     async def add_ticker(self, ticker: str) -> None:
-        if self._sim:
-            self._sim.add_ticker(ticker)
-            # Seed cache immediately so the ticker has a price right away
-            price = self._sim.get_price(ticker)
-            if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+        ticker = normalize_ticker(ticker)
+        self._sim.add_ticker(ticker)  # raises UnknownTicker for unsupported symbols
+        if ticker not in self._cache:  # priced at once; don't clobber an existing entry
+            self._cache.update(
+                ticker=ticker,
+                price=self._sim.get_price(ticker),
+                baseline_price=self._sim.get_baseline(ticker),
+            )
             logger.info("Simulator: added ticker %s", ticker)
 
     async def remove_ticker(self, ticker: str) -> None:
-        if self._sim:
-            self._sim.remove_ticker(ticker)
+        ticker = ticker.strip().upper()
+        self._sim.remove_ticker(ticker)
         self._cache.remove(ticker)
         logger.info("Simulator: removed ticker %s", ticker)
 
+    async def validate_ticker(self, ticker: str) -> bool:
+        return self._sim.is_known(ticker)
+
     def get_tickers(self) -> list[str]:
-        return self._sim.get_tickers() if self._sim else []
+        return self._sim.get_tickers()
 
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""
         while True:
             try:
-                if self._sim:
-                    prices = self._sim.step()
-                    for ticker, price in prices.items():
-                        self._cache.update(ticker=ticker, price=price)
+                for ticker, price in self._sim.step().items():
+                    self._cache.update(
+                        ticker=ticker,
+                        price=price,
+                        baseline_price=self._sim.get_baseline(ticker),
+                    )
             except Exception:
-                logger.exception("Simulator step failed")
+                logger.exception("Simulator step failed")  # keep the feed alive
             await asyncio.sleep(self._interval)
