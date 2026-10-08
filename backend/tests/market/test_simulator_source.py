@@ -1,138 +1,181 @@
-"""Integration tests for SimulatorDataSource."""
+"""Tests for SimulatorDataSource (async wrapper around GBMSimulator)."""
 
 import asyncio
 
 import pytest
 
 from app.market.cache import PriceCache
+from app.market.errors import InvalidTicker, UnknownTicker
+from app.market.seed_prices import SEED_PRICES
 from app.market.simulator import SimulatorDataSource
 
 
-@pytest.mark.asyncio
-class TestSimulatorDataSource:
-    """Integration tests for the SimulatorDataSource."""
+@pytest.fixture
+def cache():
+    return PriceCache()
 
-    async def test_start_populates_cache(self):
-        """Test that start() immediately populates the cache."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
-        await source.start(["AAPL", "GOOGL"])
 
-        # Cache should have seed prices immediately (before first loop tick)
-        assert cache.get("AAPL") is not None
-        assert cache.get("GOOGL") is not None
+async def _started(cache, tickers, **kw):
+    source = SimulatorDataSource(cache, update_interval=0.01, seed=3, **kw)
+    await source.start(tickers)
+    return source
 
+
+async def test_start_seeds_cache_before_first_tick(cache):
+    source = SimulatorDataSource(cache, update_interval=60, seed=1)
+    await source.start(["AAPL", "googl"])
+    try:
+        assert set(cache.get_all()) == {"AAPL", "GOOGL"}
+        assert cache.get_price("AAPL") == SEED_PRICES["AAPL"]
+    finally:
         await source.stop()
 
-    async def test_prices_update_over_time(self):
-        """Test that prices are updated periodically."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.05)
-        await source.start(["AAPL"])
 
-        initial_version = cache.version
-        await asyncio.sleep(0.3)  # Several update cycles
-
-        # Version should have incremented (prices updated)
-        assert cache.version > initial_version
-
+async def test_baseline_is_seed_price(cache):
+    source = await _started(cache, ["AAPL"], event_probability=1.0)
+    try:
+        await asyncio.sleep(0.1)
+        update = cache.get("AAPL")
+        assert update.baseline_price == SEED_PRICES["AAPL"]
+        assert update.price != update.baseline_price
+    finally:
         await source.stop()
 
-    async def test_stop_is_clean(self):
-        """Test that stop() is clean and idempotent."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
-        await source.start(["AAPL"])
-        await source.stop()
-        # Double stop should not raise
-        await source.stop()
 
-    async def test_add_ticker(self):
-        """Test adding a ticker dynamically."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
-        await source.start(["AAPL"])
-
-        await source.add_ticker("TSLA")
-        assert "TSLA" in source.get_tickers()
-        assert cache.get("TSLA") is not None
-
+async def test_prices_advance(cache):
+    source = await _started(cache, ["AAPL", "MSFT"])
+    try:
+        v = cache.version
+        await asyncio.sleep(0.1)
+        assert cache.version > v + 2
+    finally:
         await source.stop()
 
-    async def test_remove_ticker(self):
-        """Test removing a ticker."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
-        await source.start(["AAPL", "TSLA"])
 
-        await source.remove_ticker("TSLA")
-        assert "TSLA" not in source.get_tickers()
-        assert cache.get("TSLA") is None
-
+async def test_add_ticker_is_priced_immediately(cache):
+    source = SimulatorDataSource(cache, update_interval=60)
+    await source.start(["AAPL"])
+    try:
+        await source.add_ticker(" tsla ")
+        assert cache.get_price("TSLA") == SEED_PRICES["TSLA"]
+        assert source.get_tickers() == ["AAPL", "TSLA"]
+    finally:
         await source.stop()
 
-    async def test_get_tickers(self):
-        """Test getting the list of active tickers."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
-        await source.start(["AAPL", "GOOGL"])
 
-        tickers = source.get_tickers()
-        assert set(tickers) == {"AAPL", "GOOGL"}
-
+async def test_add_existing_does_not_clobber_cache_entry(cache):
+    source = await _started(cache, ["AAPL"])
+    try:
+        await asyncio.sleep(0.05)
+        before = cache.get("AAPL")
+        await source.add_ticker("AAPL")
+        assert cache.get("AAPL").timestamp >= before.timestamp
+        assert source.get_tickers() == ["AAPL"]
+    finally:
         await source.stop()
 
-    async def test_empty_start(self):
-        """Test starting with no tickers."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
-        await source.start([])
 
+async def test_add_unknown_ticker_raises(cache):
+    source = SimulatorDataSource(cache, update_interval=60)
+    await source.start(["AAPL"])
+    try:
+        with pytest.raises(UnknownTicker):
+            await source.add_ticker("ZZZZ")
+        with pytest.raises(InvalidTicker):
+            await source.add_ticker("bad ticker")
+        assert source.get_tickers() == ["AAPL"] and "ZZZZ" not in cache
+    finally:
+        await source.stop()
+
+
+async def test_start_skips_unsupported_tickers(cache):
+    source = SimulatorDataSource(cache, update_interval=60)
+    await source.start(["AAPL", "ZZZZ", "bad ticker"])
+    try:
+        assert source.get_tickers() == ["AAPL"]
+    finally:
+        await source.stop()
+
+
+async def test_remove_evicts_and_is_not_resurrected(cache):
+    source = await _started(cache, ["AAPL", "TSLA"])
+    try:
+        await source.remove_ticker("tsla")
+        await asyncio.sleep(0.06)
+        assert "TSLA" not in cache and source.get_tickers() == ["AAPL"]
+    finally:
+        await source.stop()
+
+
+async def test_remove_missing_is_noop(cache):
+    source = SimulatorDataSource(cache, update_interval=60)
+    await source.start(["AAPL"])
+    try:
+        await source.remove_ticker("ZZZZ")
+        assert source.get_tickers() == ["AAPL"]
+    finally:
+        await source.stop()
+
+
+async def test_validate_ticker(cache):
+    source = SimulatorDataSource(cache)
+    assert await source.validate_ticker("AAPL") is True
+    assert await source.validate_ticker("zzzz") is False
+
+
+async def test_add_before_start_is_kept(cache):
+    source = SimulatorDataSource(cache, update_interval=60)
+    await source.add_ticker("NVDA")
+    await source.start(["AAPL"])
+    try:
+        assert set(source.get_tickers()) == {"NVDA", "AAPL"}
+    finally:
+        await source.stop()
+
+
+async def test_empty_start_then_add(cache):
+    source = await _started(cache, [])
+    try:
+        await asyncio.sleep(0.03)
         assert len(cache) == 0
-        assert source.get_tickers() == []
-
+        await source.add_ticker("V")
+        assert "V" in cache
+    finally:
         await source.stop()
 
-    async def test_exception_resilience(self):
-        """Test that simulator continues running after errors."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.05)
 
-        # Start with a valid ticker
-        await source.start(["AAPL"])
+async def test_stop_is_idempotent_and_halts_writes(cache):
+    source = await _started(cache, ["AAPL"])
+    await source.stop()
+    await source.stop()
+    v = cache.version
+    await asyncio.sleep(0.05)
+    assert cache.version == v
 
-        # Wait for some updates
-        await asyncio.sleep(0.15)
 
-        # Task should still be running
-        assert source._task is not None
-        assert not source._task.done()
+async def test_stop_without_start(cache):
+    await SimulatorDataSource(cache).stop()
 
+
+async def test_loop_survives_a_failing_step(cache):
+    source = await _started(cache, ["AAPL"])
+    try:
+        real_step = source._sim.step
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return real_step()
+
+        source._sim.step = flaky
+        v = cache.version
+        await asyncio.sleep(0.1)
+        assert calls["n"] > 1 and cache.version > v
+    finally:
         await source.stop()
 
-    async def test_custom_update_interval(self):
-        """Test using a custom update interval."""
-        cache = PriceCache()
-        source = SimulatorDataSource(price_cache=cache, update_interval=0.01)
-        await source.start(["AAPL"])
 
-        initial_version = cache.version
-        await asyncio.sleep(0.05)  # Should get ~5 updates
-
-        # Should have multiple updates with fast interval
-        assert cache.version > initial_version + 2
-
-        await source.stop()
-
-    async def test_custom_event_probability(self):
-        """Test creating source with custom event probability."""
-        cache = PriceCache()
-        # Very high event probability for testing
-        source = SimulatorDataSource(
-            price_cache=cache, update_interval=0.1, event_probability=1.0
-        )
-        await source.start(["AAPL"])
-
-        # Just verify it starts and stops cleanly
-        await asyncio.sleep(0.2)
-        await source.stop()
+def test_mode():
+    assert SimulatorDataSource(PriceCache()).mode == "simulator"

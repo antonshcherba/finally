@@ -1,6 +1,8 @@
 """Seed prices and per-ticker parameters for the market simulator."""
 
-# Realistic starting prices for the default watchlist (as of project creation)
+# Realistic starting prices for the supported tickers (as of project creation).
+# This is the complete set the simulator can price; each seed is also the ticker's
+# baseline_price. To support another ticker, add it here and in TICKER_PARAMS.
 SEED_PRICES: dict[str, float] = {
     "AAPL": 190.00,
     "GOOGL": 175.00,
@@ -30,9 +32,6 @@ TICKER_PARAMS: dict[str, dict[str, float]] = {
     "NFLX": {"sigma": 0.35, "mu": 0.05},
 }
 
-# Default parameters for tickers not in the list above (dynamically added)
-DEFAULT_PARAMS: dict[str, float] = {"sigma": 0.25, "mu": 0.05}
-
 # Correlation groups for the simulator's Cholesky decomposition
 # Tickers in the same group have higher intra-group correlation
 CORRELATION_GROUPS: dict[str, set[str]] = {
@@ -43,5 +42,5 @@ CORRELATION_GROUPS: dict[str, set[str]] = {
 # Correlation coefficients
 INTRA_TECH_CORR = 0.6  # Tech stocks move together
 INTRA_FINANCE_CORR = 0.5  # Finance stocks move together
-CROSS_GROUP_CORR = 0.3  # Between sectors / unknown tickers
+CROSS_GROUP_CORR = 0.3  # Between sectors
 TSLA_CORR = 0.3  # TSLA does its own thing
