@@ -1,45 +1,33 @@
 # Code Review
 
-Reviewed commit `777f7e0` (`Align market data module with PLAN contract`) against its parent, including the market data implementation, tests, environment example, and planning/backend documentation. This was a static review; I did not run tests.
+Reviewed all changes on `market-data-contract-update` against `main` (`0a25e6a..9109dcb`), covering the market data implementation, tests, configuration, and planning documentation. This was a static review; I did not run tests.
 
 ## Findings
 
-### [Medium] Startup fails on malformed persisted tickers
+### [P1] Invalid Massive credentials can pass startup when no tickers are tracked
 
-`MassiveDataSource.start()` passes every startup ticker directly to `_track()`, which raises `InvalidTicker` for malformed values. `start_market_data()` only catches `MarketDataAuthError`, so one stale or malformed database row prevents application startup. The simulator and `set_tickers()` already skip invalid tickers.
+`MassiveDataSource.start()` relies on `_poll_once(raise_auth=True)` to check the key and plan, but `_poll_once()` returns immediately when `_tickers` is empty. With an empty watchlist/position set, the app accepts a rejected key and reports Massive as the active source. The simulator fallback in `start_market_data()` is never reached, and the key remains unchecked until a ticker is added.
 
-**Fix:** normalize and skip invalid tickers during Massive startup, logging the rejected value.
+**Fix:** perform an authenticated probe regardless of the tracked set, or defer source selection and fallback until the first ticker is validated.
 
-### [Medium] Reconciliation does not validate Massive tickers
+### [P2] Startup fails if a persisted ticker is malformed
 
-`MarketDataSource.set_tickers()` describes skipping unsupported symbols, but it only calls `add_ticker()`. Massive's `add_ticker()` checks syntax and tracks the symbol without calling `validate_ticker()`. Unsupported or delisted symbols from a watchlist/position set are therefore tracked indefinitely without prices; callers using `set_tickers()` can bypass the advertised unknown-ticker check.
+`MassiveDataSource.start()` passes every startup ticker to `_track()`, where `normalize_ticker()` raises `InvalidTicker`. `start_market_data()` catches only `MarketDataAuthError`, so one stale or malformed database row aborts application startup. `SimulatorDataSource.start()` and `MarketDataSource.set_tickers()` skip invalid tickers instead.
 
-**Fix:** validate each new symbol before adding it, preserving `PriceUnavailable` for lookup failures and skipping only a confirmed unknown symbol.
+**Fix:** catch `InvalidTicker` in Massive startup, log and skip the ticker, and continue starting the source.
 
-### [Medium] Adding several Massive tickers triggers several full-set polls
+### [P2] Adding a batch of Massive tickers triggers a batch of full-set API polls
 
-Each new Massive ticker starts an out-of-cycle poll. A batch reconcile that adds N tickers therefore schedules N requests, each fetching the entire tracked set. This can rapidly consume API quota during startup or bulk changes and cause rate limiting.
+Each new ticker in `MassiveDataSource.add_ticker()` starts an out-of-cycle `_poll_once()`. Reconciliation through `set_tickers()` adds tickers sequentially, so adding N tickers schedules N requests, each fetching the entire tracked set. Startup additions are batched before the first poll, but later bulk changes can consume quota and provoke rate limiting.
 
-**Fix:** batch additions and poll once, or coalesce pending out-of-cycle polls.
+**Fix:** coalesce pending extra polls or add a batch reconciliation operation that tracks all new symbols before polling once.
 
-### [Medium] Snapshot absence can reject a valid Massive ticker
+### [P3] Auth detection can classify rate-limit errors as rejected credentials
 
-`validate_ticker()` returns `False` when the snapshot endpoint returns no usable snapshot for the symbol. A valid symbol may have no current snapshot data (for example, before its first trade or when the endpoint omits it), so `require_known()` then reports `UnknownTicker` instead of accepting the symbol or returning an indeterminate/unavailable result. The API reference and design docs describe this ambiguity.
+`_is_auth_error()` treats any exception text containing `"api key"` or `"apikey"` as an authentication failure. A rate-limit response mentioning the key can therefore trigger permanent simulator fallback during startup instead of retry/backoff. The structured Massive error response should determine this classification.
 
-**Fix:** validate through a symbol/reference endpoint whose result does not depend on current quote availability, or preserve an indeterminate state instead of treating missing snapshot data as proof the symbol is unknown.
-
-### [Low] Auth detection can mistake rate-limit messages for rejected credentials
-
-`_is_auth_error()` treats any exception text containing “api key” or “apikey” as an auth failure. A rate-limit response whose message mentions the key can trigger simulator fallback during startup instead of normal retry/backoff.
-
-**Fix:** classify by response status and structured error code (such as `NOT_AUTHORIZED`) rather than generic message substrings.
-
-### [Low] Empty startup ticker sets do not check Massive access
-
-`_poll_once()` returns before making a request when there are no tracked tickers. With an empty watchlist/position set, a rejected key or unsupported plan is not detected and `start_market_data()` returns a Massive source instead of falling back. The source also cannot distinguish this state until tickers are later added.
-
-**Fix:** perform an authenticated startup probe independent of the tracked set, or defer source selection and fallback until the first ticker is validated.
+**Fix:** classify from HTTP status and structured error code (for example `NOT_AUTHORIZED`) rather than generic message substrings.
 
 ## Review notes
 
-The cache snapshot/version locking, snapshot parsing fallback chain, timestamp normalization, simulator ticker restrictions, and SSE payload shape are consistent with the changed code and its updated documentation. The Massive field parsing and HTTP streaming integration still need live/API or end-to-end verification; this review did not run tests.
+The changes implement the updated cache/SSE payload, baseline prices, ticker normalization, source reconciliation, and simulator constraints. I did not identify additional actionable defects in those paths during this static review. Live Massive API behavior and end-to-end SSE transport were not verified.
