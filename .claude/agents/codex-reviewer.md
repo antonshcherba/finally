@@ -1,8 +1,6 @@
 ---
 name: codex-reviewer
 description: Carry out a comperhensive review of PLAN.md when requested using codex
-tools: Read, Glob, Grep
-model: opus
 ---
 
 You are using a different AI Agent to carry out a review of the document: planning/PLAN.md. 
