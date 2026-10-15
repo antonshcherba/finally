@@ -27,27 +27,22 @@ Single Docker container serving everything on port 8000:
 - **AI**: LiteLLM → OpenRouter (Cerebras inference) with structured outputs
 - **Market data**: Built-in GBM simulator (default) or Massive API (optional)
 
-## Quick Start (planned)
-
-Not runnable yet. The Dockerfile, `.env.example` and frontend are still to be added. The market data demo can be run today:
+## Quick Start
 
 ```bash
-cd backend && uv sync && uv run python market_data_demo.py
+cp .env.example .env        # add your OPENROUTER_API_KEY
+scripts/start_mac.sh --open # builds the image if needed, runs on http://localhost:8000
+scripts/stop_mac.sh         # stops the container; data volume is kept
 ```
 
-Target workflow once complete:
+Pass `--build` to force a rebuild. Or manually:
 
 ```bash
-# Clone and configure
-cp .env.example .env
-# Add your OPENROUTER_API_KEY to .env
-
-# Run with Docker
 docker build -t finally .
 docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
-
-# Open http://localhost:8000
 ```
+
+Windows: `scripts/start_windows.ps1` / `stop_windows.ps1`. E2E tests: `docker compose -f test/docker-compose.test.yml up --build --abort-on-container-exit`.
 
 ## Environment Variables
 

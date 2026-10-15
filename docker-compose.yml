@@ -1,0 +1,11 @@
+services:
+  finally:
+    build: .
+    image: finally
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - finally-data:/app/db
+volumes:
+  finally-data:

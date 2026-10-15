@@ -1,0 +1,24 @@
+services:
+  app:
+    build:
+      context: ..
+    environment:
+      LLM_MOCK: "true"
+      OPENROUTER_API_KEY: ""
+      MASSIVE_API_KEY: ""
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.49.1-jammy
+    working_dir: /work
+    volumes:
+      - ./:/work
+    environment:
+      BASE_URL: http://app:8000
+    depends_on:
+      app:
+        condition: service_healthy
+    command: sh -c "npm install && npx playwright test"
